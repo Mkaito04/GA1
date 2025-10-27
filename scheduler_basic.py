@@ -176,7 +176,7 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
 
 def create_text_output(machine_schedules: Dict[str, List], machine_list: List[Machine], output_file: str = "schedule_result.txt"):
     """
-    スケジュール結果をテキストファイルに出力する
+    スケジュール結果をテキストファイルに出力する__
     
     Args:
         machine_schedules: マシンごとのスケジュール情報
