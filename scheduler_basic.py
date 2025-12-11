@@ -203,6 +203,7 @@ class GeneticAlgorithm:
         Returns:
             選択された個体
         """
+        # トーナメント選択のインデックスをランダムに選択
         tournament_indices = random.sample(range(len(population)), tournament_size)
         tournament_fitness = [fitness_values[i] for i in tournament_indices]
         
