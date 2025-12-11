@@ -19,6 +19,7 @@ from typing import List, Dict, Optional, Tuple
 class GeneticAlgorithm:
     """
     遺伝的アルゴリズム（GA）によるジョブスケジュール最適化クラス
+    ジョブ順序とマシン割り当ての両方を最適化
     """
     
     def __init__(self, job_list: List[Job], machine_dict: Dict[str, List[Machine]], 
@@ -53,37 +54,59 @@ class GeneticAlgorithm:
         # 進化の履歴を保存
         self.fitness_history = []
     
-    def create_individual(self) -> List[str]:
+    def create_individual(self) -> Dict:
         """
-        ランダムな個体（ジョブ順序）を生成
+        ランダムな個体（ジョブ順序 + マシン割り当て）を生成
         
         Returns:
-            ジョブIDの順序リスト
+            個体辞書: {
+                'job_order': List[str],  # ジョブ順序
+                'machine_assignment': Dict[Tuple[str, str], str]  # (ジョブ名, 工程名) -> マシン名
+            }
         """
-        individual = self.job_ids.copy()
-        random.shuffle(individual)
-        return individual
+        # ランダムなジョブ順序を生成
+        job_order = self.job_ids.copy()
+        random.shuffle(job_order)
+        
+        # ランダムなマシン割り当てを生成
+        machine_assignment = {}
+        for job in self.job_list:
+            for process in job.process_list:
+                process_name = process.label
+                available_machines = self.machine_dict.get(process_name, [])
+                if len(available_machines) > 0:
+                    # ランダムにマシンを選択
+                    selected_machine = random.choice(available_machines)
+                    machine_assignment[(job.name, process_name)] = selected_machine.name
+        
+        return {
+            'job_order': job_order,
+            'machine_assignment': machine_assignment
+        }
     
-    def evaluate_fitness(self, individual: List[str]) -> float:
+    def evaluate_fitness(self, individual: Dict) -> float:
         """
         個体の適応度（makespan）を評価
         
         Args:
-            individual: ジョブ順序のリスト
+            individual: 個体辞書（job_order, machine_assignmentを含む）
             
         Returns:
             適応度（makespan）- 小さいほど良い
         """
+        job_order = individual['job_order']
+        machine_assignment = individual['machine_assignment']
+        
         # ジョブ順序に基づいてジョブリストを再構築
         ordered_jobs = []
-        for job_id in individual:
+        for job_id in job_order:
             for job in self.job_list:
                 if job.name == job_id:
                     ordered_jobs.append(job)
                     break
         
-        # スケジュールを評価
-        machine_schedules = self._evaluate_schedule_with_order(ordered_jobs)
+        # 指定されたマシン割り当てでスケジュールを評価
+        machine_schedules = self._evaluate_schedule_with_assignment(ordered_jobs, machine_assignment)
         
         # makespanを計算（最大完了時刻）
         makespan = 0.0
@@ -93,12 +116,14 @@ class GeneticAlgorithm:
         
         return makespan
     
-    def _evaluate_schedule_with_order(self, ordered_jobs: List[Job]) -> Dict[str, List]:
+    def _evaluate_schedule_with_assignment(self, ordered_jobs: List[Job], 
+                                           machine_assignment: Dict[Tuple[str, str], str]) -> Dict[str, List]:
         """
-        指定されたジョブ順序でスケジュールを評価
+        指定されたジョブ順序とマシン割り当てでスケジュールを評価
         
         Args:
             ordered_jobs: ジョブの順序リスト
+            machine_assignment: (ジョブ名, 工程名) -> マシン名の辞書
             
         Returns:
             マシンごとのスケジュール情報
@@ -120,40 +145,37 @@ class GeneticAlgorithm:
                 process_name = process.label
                 process_time = process.time
                 
-                # この工程を処理できるマシンを見つける
+                # マシン割り当てから指定されたマシンを取得
+                assignment_key = (job.name, process_name)
+                if assignment_key not in machine_assignment:
+                    continue
+                
+                assigned_machine_name = machine_assignment[assignment_key]
+                
+                # 指定されたマシンが存在するか確認
+                assigned_machine = None
                 available_machines = self.machine_dict.get(process_name, [])
-                
-                if len(available_machines) == 0:
-                    continue
-                
-                # 最も早く利用可能なマシンを見つける
-                best_machine = None
-                earliest_start_time = float('inf')
-                
                 for machine in available_machines:
-                    # 前の工程が終わった時刻を取得
-                    prev_end_time = 0.0
-                    if i > 0:
-                        prev_process = job.process_list[i - 1]
-                        for mach_name, schedule in machine_schedules.items():
-                            for item in schedule:
-                                if item['job_name'] == job.name and item['process_label'] == prev_process.label:
-                                    prev_end_time = max(prev_end_time, item['end_time'])
-                    
-                    # このマシンが利用可能になる時刻
-                    machine_start_time = max(machine_available_time[machine.name], prev_end_time)
-                    
-                    if machine_start_time < earliest_start_time:
-                        earliest_start_time = machine_start_time
-                        best_machine = machine
+                    if machine.name == assigned_machine_name:
+                        assigned_machine = machine
+                        break
                 
-                if best_machine is None:
+                if assigned_machine is None:
                     continue
                 
-                # マシンが利用可能になる時刻を更新
-                start_time = earliest_start_time
+                # 前の工程が終わった時刻を取得
+                prev_end_time = 0.0
+                if i > 0:
+                    prev_process = job.process_list[i - 1]
+                    for mach_name, schedule in machine_schedules.items():
+                        for item in schedule:
+                            if item['job_name'] == job.name and item['process_label'] == prev_process.label:
+                                prev_end_time = max(prev_end_time, item['end_time'])
+                
+                # このマシンが利用可能になる時刻
+                start_time = max(machine_available_time[assigned_machine.name], prev_end_time)
                 end_time = start_time + process_time
-                machine_available_time[best_machine.name] = end_time
+                machine_available_time[assigned_machine.name] = end_time
                 
                 # スケジュール情報を保存
                 schedule_item = {
@@ -164,12 +186,12 @@ class GeneticAlgorithm:
                     'end_time': end_time,
                     'duration': process_time
                 }
-                machine_schedules[best_machine.name].append(schedule_item)
+                machine_schedules[assigned_machine.name].append(schedule_item)
         
         return machine_schedules
     
-    def tournament_selection(self, population: List[List[str]], fitness_values: List[float], 
-                           tournament_size: int = 3) -> List[str]:
+    def tournament_selection(self, population: List[Dict], fitness_values: List[float], 
+                           tournament_size: int = 3) -> Dict:
         """
         トーナメント選択
         
@@ -186,9 +208,9 @@ class GeneticAlgorithm:
         
         # 最小の適応度（最良）の個体を選択
         winner_index = tournament_indices[tournament_fitness.index(min(tournament_fitness))]
-        return population[winner_index].copy()
+        return copy.deepcopy(population[winner_index])
     
-    def roulette_selection(self, population: List[List[str]], fitness_values: List[float]) -> List[str]:
+    def roulette_selection(self, population: List[Dict], fitness_values: List[float]) -> Dict:
         """
         ルーレット選択
         
@@ -211,13 +233,13 @@ class GeneticAlgorithm:
         for i, weight in enumerate(weights):
             cumulative_weight += weight
             if r <= cumulative_weight:
-                return population[i].copy()
+                return copy.deepcopy(population[i])
         
-        return population[-1].copy()
+        return copy.deepcopy(population[-1])
     
-    def one_point_crossover(self, parent1: List[str], parent2: List[str]) -> Tuple[List[str], List[str]]:
+    def crossover(self, parent1: Dict, parent2: Dict) -> Tuple[Dict, Dict]:
         """
-        一点交叉
+        交叉操作（ジョブ順序とマシン割り当ての両方を交叉）
         
         Args:
             parent1: 親個体1
@@ -226,70 +248,81 @@ class GeneticAlgorithm:
         Returns:
             子個体のペア
         """
-        if len(parent1) <= 1:
-            return parent1.copy(), parent2.copy()
+        # ジョブ順序の交叉
+        job_order1 = parent1['job_order']
+        job_order2 = parent2['job_order']
         
-        crossover_point = random.randint(1, len(parent1) - 1)
+        if len(job_order1) <= 1:
+            child1_job_order = job_order1.copy()
+            child2_job_order = job_order2.copy()
+        else:
+            # 順序交叉（OX）を使用
+            if len(job_order1) <= 2:
+                child1_job_order = job_order1.copy()
+                child2_job_order = job_order2.copy()
+            else:
+                # 交叉点をランダムに選択
+                start = random.randint(0, len(job_order1) - 2)
+                end = random.randint(start + 1, len(job_order1) - 1)
+                
+                # 子個体1のジョブ順序
+                child1_job_order = [None] * len(job_order1)
+                child1_job_order[start:end+1] = job_order1[start:end+1]
+                remaining = [job for job in job_order2 if job not in child1_job_order[start:end+1]]
+                idx = 0
+                for i in range(len(child1_job_order)):
+                    if child1_job_order[i] is None:
+                        child1_job_order[i] = remaining[idx]
+                        idx += 1
+                
+                # 子個体2のジョブ順序
+                child2_job_order = [None] * len(job_order2)
+                child2_job_order[start:end+1] = job_order2[start:end+1]
+                remaining = [job for job in job_order1 if job not in child2_job_order[start:end+1]]
+                idx = 0
+                for i in range(len(child2_job_order)):
+                    if child2_job_order[i] is None:
+                        child2_job_order[i] = remaining[idx]
+                        idx += 1
         
-        # 子個体1: parent1の前半 + parent2の後半（重複を避ける）
-        child1 = parent1[:crossover_point].copy()
-        remaining1 = [job for job in parent2 if job not in child1]
-        child1.extend(remaining1)
+        # マシン割り当ての交叉（一様交叉）
+        machine_assignment1 = parent1['machine_assignment']
+        machine_assignment2 = parent2['machine_assignment']
         
-        # 子個体2: parent2の前半 + parent1の後半（重複を避ける）
-        child2 = parent2[:crossover_point].copy()
-        remaining2 = [job for job in parent1 if job not in child2]
-        child2.extend(remaining2)
+        child1_machine_assignment = {}
+        child2_machine_assignment = {}
+        
+        # すべての割り当てキーを取得
+        all_keys = set(machine_assignment1.keys()) | set(machine_assignment2.keys())
+        
+        for key in all_keys:
+            if random.random() < 0.5:
+                # parent1から継承
+                if key in machine_assignment1:
+                    child1_machine_assignment[key] = machine_assignment1[key]
+                if key in machine_assignment2:
+                    child2_machine_assignment[key] = machine_assignment2[key]
+            else:
+                # parent2から継承
+                if key in machine_assignment2:
+                    child1_machine_assignment[key] = machine_assignment2[key]
+                if key in machine_assignment1:
+                    child2_machine_assignment[key] = machine_assignment1[key]
+        
+        child1 = {
+            'job_order': child1_job_order,
+            'machine_assignment': child1_machine_assignment
+        }
+        child2 = {
+            'job_order': child2_job_order,
+            'machine_assignment': child2_machine_assignment
+        }
         
         return child1, child2
     
-    def order_crossover(self, parent1: List[str], parent2: List[str]) -> Tuple[List[str], List[str]]:
+    def mutation(self, individual: Dict) -> Dict:
         """
-        順序交叉（OX）
-        
-        Args:
-            parent1: 親個体1
-            parent2: 親個体2
-            
-        Returns:
-            子個体のペア
-        """
-        if len(parent1) <= 2:
-            return parent1.copy(), parent2.copy()
-        
-        # 交叉点をランダムに選択
-        start = random.randint(0, len(parent1) - 2)
-        end = random.randint(start + 1, len(parent1) - 1)
-        
-        # 子個体1の作成
-        child1 = [None] * len(parent1)
-        child1[start:end+1] = parent1[start:end+1]
-        
-        # parent2から残りの要素を順序を保って追加
-        remaining = [job for job in parent2 if job not in child1[start:end+1]]
-        idx = 0
-        for i in range(len(child1)):
-            if child1[i] is None:
-                child1[i] = remaining[idx]
-                idx += 1
-        
-        # 子個体2の作成
-        child2 = [None] * len(parent2)
-        child2[start:end+1] = parent2[start:end+1]
-        
-        # parent1から残りの要素を順序を保って追加
-        remaining = [job for job in parent1 if job not in child2[start:end+1]]
-        idx = 0
-        for i in range(len(child2)):
-            if child2[i] is None:
-                child2[i] = remaining[idx]
-                idx += 1
-        
-        return child1, child2
-    
-    def swap_mutation(self, individual: List[str]) -> List[str]:
-        """
-        スワップ突然変異（2つのジョブの順序を入れ替える）
+        突然変異（ジョブ順序の入れ替え + マシン割り当ての変更）
         
         Args:
             individual: 個体
@@ -297,16 +330,33 @@ class GeneticAlgorithm:
         Returns:
             突然変異後の個体
         """
-        if len(individual) <= 1:
-            return individual.copy()
+        mutated = copy.deepcopy(individual)
         
-        mutated = individual.copy()
-        i, j = random.sample(range(len(mutated)), 2)
-        mutated[i], mutated[j] = mutated[j], mutated[i]
+        # ジョブ順序の突然変異（スワップ）
+        job_order = mutated['job_order']
+        if len(job_order) > 1:
+            i, j = random.sample(range(len(job_order)), 2)
+            job_order[i], job_order[j] = job_order[j], job_order[i]
+        
+        # マシン割り当ての突然変異（ランダムに変更）
+        machine_assignment = mutated['machine_assignment']
+        mutation_keys = list(machine_assignment.keys())
+        if len(mutation_keys) > 0:
+            # 一部の割り当てをランダムに変更
+            num_mutations = max(1, len(mutation_keys) // 10)  # 10%程度を変更
+            keys_to_mutate = random.sample(mutation_keys, min(num_mutations, len(mutation_keys)))
+            
+            for key in keys_to_mutate:
+                job_name, process_name = key
+                available_machines = self.machine_dict.get(process_name, [])
+                if len(available_machines) > 0:
+                    # ランダムにマシンを選択
+                    selected_machine = random.choice(available_machines)
+                    machine_assignment[key] = selected_machine.name
         
         return mutated
     
-    def evolve(self) -> Tuple[List[str], float, Dict[str, List]]:
+    def evolve(self) -> Tuple[Dict, float, Dict[str, List]]:
         """
         遺伝的アルゴリズムの進化を実行
         
@@ -315,6 +365,7 @@ class GeneticAlgorithm:
         """
         print(f"遺伝的アルゴリズム開始: 個体数={self.population_size}, 世代数={self.max_generations}")
         print(f"交叉確率={self.crossover_rate}, 突然変異確率={self.mutation_rate}")
+        print("最適化対象: ジョブ順序 + マシン割り当て")
         
         # 初期個体群を生成
         population = [self.create_individual() for _ in range(self.population_size)]
@@ -328,10 +379,22 @@ class GeneticAlgorithm:
             if min_fitness < self.best_fitness:
                 self.best_fitness = min_fitness
                 best_idx = fitness_values.index(min_fitness)
-                self.best_individual = population[best_idx].copy()
-                self.best_schedule = self._evaluate_schedule_with_order(
-                    [job for job_id in self.best_individual 
-                     for job in self.job_list if job.name == job_id]
+                self.best_individual = copy.deepcopy(population[best_idx])
+                
+                # 最良スケジュールを評価
+                best_job_order = self.best_individual['job_order']
+                best_machine_assignment = self.best_individual['machine_assignment']
+                
+                # ジョブ順序に基づいてジョブリストを再構築
+                ordered_jobs = []
+                for job_id in best_job_order:
+                    for job in self.job_list:
+                        if job.name == job_id:
+                            ordered_jobs.append(job)
+                            break
+                
+                self.best_schedule = self._evaluate_schedule_with_assignment(
+                    ordered_jobs, best_machine_assignment
                 )
             
             self.fitness_history.append(min_fitness)
@@ -345,7 +408,7 @@ class GeneticAlgorithm:
             
             # エリート保存（最良個体を保持）
             elite_idx = fitness_values.index(min_fitness)
-            new_population.append(population[elite_idx].copy())
+            new_population.append(copy.deepcopy(population[elite_idx]))
             
             # 残りの個体を生成
             while len(new_population) < self.population_size:
@@ -355,18 +418,16 @@ class GeneticAlgorithm:
                 
                 # 交叉
                 if random.random() < self.crossover_rate:
-                    if random.random() < 0.5:
-                        child1, child2 = self.one_point_crossover(parent1, parent2)
-                    else:
-                        child1, child2 = self.order_crossover(parent1, parent2)
+                    child1, child2 = self.crossover(parent1, parent2)
                 else:
-                    child1, child2 = parent1.copy(), parent2.copy()
+                    child1 = copy.deepcopy(parent1)
+                    child2 = copy.deepcopy(parent2)
                 
                 # 突然変異
                 if random.random() < self.mutation_rate:
-                    child1 = self.swap_mutation(child1)
+                    child1 = self.mutation(child1)
                 if random.random() < self.mutation_rate:
-                    child2 = self.swap_mutation(child2)
+                    child2 = self.mutation(child2)
                 
                 new_population.extend([child1, child2])
             
@@ -730,6 +791,66 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
     plt.close()
 
 
+def create_evolution_chart(fitness_history: List[float], filename: str = "evolution_chart.jpeg"):
+    """
+    進化の履歴（世代ごとの最良適応度）をグラフ化する
+    
+    Args:
+        fitness_history: 各世代の最良適応度のリスト
+        filename: 出力ファイル名
+    """
+    # 日本語フォントを設定
+    plt.rcParams['font.sans-serif'] = ['MS Gothic', 'Yu Gothic', 'Meiryo', 'Takao', 'IPAexGothic', 'IPAPGothic', 'VL PGothic', 'Noto Sans CJK JP']
+    plt.rcParams['axes.unicode_minus'] = False
+    
+    # 図と軸を作成
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # 世代番号
+    generations = list(range(1, len(fitness_history) + 1))
+    
+    # グラフを描画
+    ax.plot(generations, fitness_history, linewidth=2, color='#2E86AB', marker='o', markersize=3, label='最良適応度')
+    
+    # 最小値を強調表示
+    min_fitness = min(fitness_history)
+    min_generation = fitness_history.index(min_fitness) + 1
+    ax.scatter([min_generation], [min_fitness], color='red', s=100, zorder=5, 
+               label=f'最良解 (世代{min_generation}: {min_fitness:.2f})')
+    
+    # 軸の設定
+    ax.set_xlabel('世代', fontsize=12, fontweight='bold')
+    ax.set_ylabel('適応度 (Makespan)', fontsize=12, fontweight='bold')
+    ax.set_title('遺伝的アルゴリズムの進化過程', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.legend(loc='best', fontsize=10)
+    
+    # 初期値と最終値を表示
+    initial_fitness = fitness_history[0]
+    final_fitness = fitness_history[-1]
+    improvement = initial_fitness - final_fitness
+    improvement_rate = (improvement / initial_fitness) * 100
+    
+    # テキストボックスに統計情報を追加
+    stats_text = f'初期適応度: {initial_fitness:.2f}\n'
+    stats_text += f'最終適応度: {final_fitness:.2f}\n'
+    stats_text += f'改善量: {improvement:.2f} ({improvement_rate:.1f}%)'
+    
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+            fontsize=9, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # レイアウトを調整
+    plt.tight_layout()
+    
+    # 図をJPEGファイルとして保存
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"進化グラフを {filename} に保存しました。")
+    
+    # 図を閉じる（メモリ節約のため表示しない）
+    plt.close()
+
+
 def create_text_output(machine_schedules: Dict[str, List], machine_list: List[Machine], output_file: str = "schedule_result.txt"):
     """
     スケジュール結果をテキストファイルに出力する__
@@ -902,8 +1023,20 @@ def main():
         best_individual, best_fitness, best_schedule = ga.evolve()
         
         print(f"\n最適化完了!")
-        print(f"最良ジョブ順序: {best_individual}")
+        print(f"最良ジョブ順序: {best_individual['job_order']}")
         print(f"最良makespan: {best_fitness:.2f}")
+        print(f"\nマシン割り当て例（最初の3ジョブ）:")
+        job_order = best_individual['job_order']
+        machine_assignment = best_individual['machine_assignment']
+        for i, job_id in enumerate(job_order[:3]):
+            print(f"  {job_id}:")
+            for job in job_list:
+                if job.name == job_id:
+                    for process in job.process_list:
+                        key = (job.name, process.label)
+                        if key in machine_assignment:
+                            print(f"    {process.label} -> {machine_assignment[key]}")
+                    break
         
         # 最適スケジュールの詳細を表示
         print("\n--- 最適スケジュール ---")
@@ -926,6 +1059,11 @@ def main():
                 print(f"  世代 {i+1}: {fitness:.2f}")
             elif i == 10 and len(ga.fitness_history) > 20:
                 print("  ...")
+        
+        # 進化のグラフを作成
+        evolution_file = "evolution_chart.jpeg"
+        print(f"進化グラフを {evolution_file} に出力中...")
+        create_evolution_chart(ga.fitness_history, evolution_file)
         
         # 比較のため、ランダムスケジュールも生成
         print(f"\n比較のため、ランダムスケジュールも生成中...")
