@@ -3,6 +3,8 @@ scheduler_basic.py - マシンに基づく簡易スケジューリングとガ�
 
 このスクリプトは、AMR（搬送）を考慮せず、マシンのみでジョブスケジュールを組み、
 ガントチャートで表示し、実行結果をテキストファイルに出力します。
+
+経路を考慮したガントチャートも作成可能です。
 """
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -10,6 +12,8 @@ import sys
 import itertools
 import random
 import copy
+import os
+import shutil
 from datetime import datetime
 from package.data_manager import load_job_data, load_machine_data, convert_machine_list_into_dict
 from package.classes import Job, Machine, Process, Port
@@ -24,7 +28,9 @@ class GeneticAlgorithm:
     
     def __init__(self, job_list: List[Job], machine_dict: Dict[str, List[Machine]], 
                  population_size: int = 50, crossover_rate: float = 0.8, 
-                 mutation_rate: float = 0.1, max_generations: int = 100):
+                 mutation_rate: float = 0.1, max_generations: int = 100,
+                 route_dict: Optional[Dict[str, Route]] = None,
+                 edge_graph: Optional[Dict[str, Dict[str, float]]] = None):
         """
         GAのパラメータを初期化
         
@@ -35,6 +41,8 @@ class GeneticAlgorithm:
             crossover_rate: 交叉確率
             mutation_rate: 突然変異確率
             max_generations: 最大世代数
+            route_dict: 経路データの辞書（搬送時間を考慮する場合、後方互換性のため）
+            edge_graph: エッジグラフ（搬送時間を計算する場合）
         """
         self.job_list = job_list
         self.machine_dict = machine_dict
@@ -42,6 +50,8 @@ class GeneticAlgorithm:
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
         self.max_generations = max_generations
+        self.route_dict = route_dict  # 経路データ（後方互換性のため）
+        self.edge_graph = edge_graph  # エッジグラフ（最短経路計算用）
         
         # ジョブIDのリストを作成
         self.job_ids = [job.name for job in job_list]
@@ -126,10 +136,11 @@ class GeneticAlgorithm:
             machine_assignment: (ジョブ名, 工程名) -> マシン名の辞書
             
         Returns:
-            マシンごとのスケジュール情報
+            マシンごとのスケジュール情報（搬送時間も含む）
         """
         machine_schedules: Dict[str, List] = {}
         machine_available_time: Dict[str, float] = {}
+        transport_schedules: List[Dict] = []  # 搬送スケジュール
         
         # 全てのマシンに対して初期化
         for process_name, machines in self.machine_dict.items():
@@ -184,9 +195,14 @@ class GeneticAlgorithm:
                     'process_index': i,
                     'start_time': start_time,
                     'end_time': end_time,
-                    'duration': process_time
+                    'duration': process_time,
+                    'type': 'process'
                 }
                 machine_schedules[assigned_machine.name].append(schedule_item)
+        
+        # 搬送スケジュールをマシンスケジュールに追加（"Transport"という仮想マシンとして）
+        if len(transport_schedules) > 0:
+            machine_schedules['Transport'] = transport_schedules
         
         return machine_schedules
     
@@ -704,13 +720,15 @@ def generate_schedules(job_list: List[Job], machine_dict: Dict[str, List[Machine
 
 
 def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Machine], 
-                       filename: str = "ganttchart.jpeg"):
+                       filename: str = "ganttchart.jpeg", include_transport: bool = False):
     """
-    ガントチャートを作成して表示する
+    ガントチャートを作成して表示する（搬送時間を考慮した版）
     
     Args:
         machine_schedules: マシンごとのスケジュール情報
         machine_list: マシンのリスト（表示順序を決定するため）
+        filename: 出力ファイル名
+        include_transport: 搬送時間を含めるかどうか
     """
     # 日本語フォントを設定
     plt.rcParams['font.sans-serif'] = ['MS Gothic', 'Yu Gothic', 'Meiryo', 'Takao', 'IPAexGothic', 'IPAPGothic', 'VL PGothic', 'Noto Sans CJK JP']
@@ -725,6 +743,11 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
     
     # マシンリストの順序を維持して表示
     machine_order = [machine.name for machine in machine_list]
+    
+    # 搬送時間を含める場合、Transport行を追加
+    if include_transport and 'Transport' in machine_schedules:
+        machine_order.append('Transport')
+    
     y_positions = {machine_name: idx for idx, machine_name in enumerate(machine_order)}
     
     # タイムラインの最大値を見つける
@@ -742,8 +765,6 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
             start = schedule['start_time']
             end = schedule['end_time']
             job_name = schedule['job_name']
-            process_label = schedule['process_label']
-            process_idx = schedule['process_index']
             
             # ジョブごとに色を割り当て
             if job_name not in job_colors:
@@ -751,16 +772,37 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
             
             # バーを作成
             duration = end - start
-            bar_label = f"{job_name}-{process_label}"
+            
+            # 搬送時間と処理時間で異なるスタイルを使用
+            if schedule.get('type') == 'transport':
+                # 搬送時間は点線のバーで表示
+                bar_label = f"{job_name}\n({schedule.get('from_machine', '')}→{schedule.get('to_machine', '')})"
+                edge_color = 'red'
+                line_style = '--'
+                alpha = 0.6
+            else:
+                # 処理時間は通常のバーで表示
+                process_label = schedule.get('process_label', '')
+                bar_label = f"{job_name}-{process_label}"
+                edge_color = 'black'
+                line_style = '-'
+                alpha = 1.0
             
             # ガントチャートバーを描画
-            ax.barh(y_pos, duration, left=start, height=0.7, 
-                   color=job_colors[job_name], edgecolor='black', linewidth=0.5)
+            if schedule.get('type') == 'transport':
+                # 搬送時間は点線のバー
+                ax.barh(y_pos, duration, left=start, height=0.5, 
+                       color=job_colors[job_name], edgecolor=edge_color, 
+                       linewidth=1.5, linestyle=line_style, alpha=alpha, hatch='///')
+            else:
+                # 処理時間は通常のバー
+                ax.barh(y_pos, duration, left=start, height=0.7, 
+                       color=job_colors[job_name], edgecolor=edge_color, linewidth=0.5)
             
             # バーの中央にラベルを追加
-            if duration > 2:  # 短すぎるバーにはラベルを付けない
+            if duration > 1:  # 短すぎるバーにはラベルを付けない
                 ax.text(start + duration / 2, y_pos, bar_label,
-                       ha='center', va='center', fontsize=8, fontweight='bold')
+                       ha='center', va='center', fontsize=7, fontweight='bold')
             
             max_time = max(max_time, end)
     
@@ -769,7 +811,12 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
     ax.set_yticklabels(machine_order)
     ax.set_xlabel('時間', fontsize=12, fontweight='bold')
     ax.set_ylabel('マシン', fontsize=12, fontweight='bold')
-    ax.set_title('ジョブスケジュール - ガントチャート', fontsize=14, fontweight='bold')
+    
+    if include_transport:
+        ax.set_title('ジョブスケジュール - ガントチャート（搬送時間考慮）', fontsize=14, fontweight='bold')
+    else:
+        ax.set_title('ジョブスケジュール - ガントチャート', fontsize=14, fontweight='bold')
+    
     ax.set_xlim(0, max_time * 1.05)
     ax.grid(True, axis='x', alpha=0.3)
     
@@ -777,6 +824,12 @@ def create_gantt_chart(machine_schedules: Dict[str, List], machine_list: List[Ma
     legend_elements = []
     for job_name, color in job_colors.items():
         legend_elements.append(mpatches.Patch(facecolor=color, edgecolor='black', label=job_name))
+    
+    # 搬送時間の説明を追加
+    if include_transport:
+        legend_elements.append(mpatches.Patch(facecolor='gray', edgecolor='red', 
+                                             linestyle='--', hatch='///', alpha=0.6, 
+                                             label='搬送時間'))
     
     ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.15, 1), title='ジョブ')
     
@@ -877,7 +930,12 @@ def create_text_output(machine_schedules: Dict[str, List], machine_list: List[Ma
             
             schedules = machine_schedules[machine_name]
             for schedule in schedules:
-                f.write(f"  {schedule['job_name']}-{schedule['process_label']}: "
+                if schedule.get('type') == 'transport':
+                    f.write(f"  {schedule['job_name']} 搬送 ({schedule.get('from_machine', '')}→{schedule.get('to_machine', '')}): "
+                           f"{schedule['start_time']:.1f} ~ {schedule['end_time']:.1f} "
+                           f"(所要時間: {schedule['duration']:.1f})\n")
+                else:
+                    f.write(f"  {schedule['job_name']}-{schedule.get('process_label', '')}: "
                        f"{schedule['start_time']:.1f} ~ {schedule['end_time']:.1f} "
                        f"(所要時間: {schedule['duration']:.1f})\n")
             f.write("\n")
@@ -944,7 +1002,12 @@ def print_schedule_summary(machine_schedules: Dict[str, List]):
         
         print(f"\n【{machine_name}】")
         for schedule in schedules:
-            print(f"  {schedule['job_name']}-{schedule['process_label']}: "
+            if schedule.get('type') == 'transport':
+                print(f"  {schedule['job_name']} 搬送 ({schedule.get('from_machine', '')}→{schedule.get('to_machine', '')}): "
+                      f"{schedule['start_time']:.1f} ~ {schedule['end_time']:.1f} "
+                      f"(所要時間: {schedule['duration']:.1f})")
+            else:
+                print(f"  {schedule['job_name']}-{schedule.get('process_label', '')}: "
                   f"{schedule['start_time']:.1f} ~ {schedule['end_time']:.1f} "
                   f"(所要時間: {schedule['duration']:.1f})")
 
@@ -991,8 +1054,17 @@ def main():
         job_list = load_job_data('data/case01_job.csv')
         machine_list = load_machine_data('data/case01_machine.csv')
         
+        # エッジデータを読み込む（最短経路計算用）
+        edge_graph = load_edge_data('data/case01_edge.csv')
+        
+        # 経路データを読み込む（後方互換性のため）
+        route_list = load_route_data('data/case01_route.csv')
+        route_dict = convert_route_list_into_dict(route_list)
+        
         print(f"読み込まれたジョブ数: {len(job_list)}")
         print(f"読み込まれたマシン数: {len(machine_list)}")
+        print(f"読み込まれたエッジ数: {sum(len(neighbors) for neighbors in edge_graph.values()) // 2}")
+        print(f"読み込まれた経路数: {len(route_list)}")
         
         goal_port: Port = Port('7', 'END')
         start_port: Port = Port('1', 'START')
@@ -1003,8 +1075,8 @@ def main():
         for process_name, machines in machine_dict.items():
             print(f"  {process_name}: {[m.name for m in machines]}")
         
-        # 遺伝的アルゴリズムでスケジュール最適化
-        print("\n遺伝的アルゴリズムによるスケジュール最適化中...")
+        # 遺伝的アルゴリズムでスケジュール最適化（搬送時間を考慮しない）
+        print("\n遺伝的アルゴリズムによるスケジュール最適化中（搬送時間考慮なし）...")
         
         # GAパラメータ（簡単に変更可能）
         POPULATION_SIZE = 50      # 個体数
@@ -1012,14 +1084,15 @@ def main():
         MUTATION_RATE = 0.1       # 突然変異確率
         MAX_GENERATIONS = 100     # 最大世代数
         
-        # GAを実行
+        # GAを実行（搬送時間を考慮しない）
         ga = GeneticAlgorithm(
             job_list=job_list,
             machine_dict=machine_dict,
             population_size=POPULATION_SIZE,
             crossover_rate=CROSSOVER_RATE,
             mutation_rate=MUTATION_RATE,
-            max_generations=MAX_GENERATIONS
+            max_generations=MAX_GENERATIONS,
+            route_dict=None  # 搬送時間を考慮しない
         )
         
         best_individual, best_fitness, best_schedule = ga.evolve()
@@ -1041,7 +1114,7 @@ def main():
                     break
         
         # 最適スケジュールの詳細を表示
-        print("\n--- 最適スケジュール ---")
+        print("\n--- 最適スケジュール（搬送時間考慮なし） ---")
         print_schedule_summary(best_schedule)
         
         # テキストファイルに詳細結果を出力
@@ -1049,13 +1122,60 @@ def main():
         print(f"詳細結果を {output_file} に出力中...")
         create_text_output(best_schedule, machine_list, output_file)
         
-        # ガントチャートを作成
+        # ガントチャートを作成（搬送時間を含まない）
         gantt_file = "ganttchart_optimized.jpeg"
-        print(f"ガントチャートを {gantt_file} に出力中...")
-        create_gantt_chart(best_schedule, machine_list, gantt_file)
+        print(f"ガントチャート（搬送時間考慮なし）を {gantt_file} に出力中...")
+        create_gantt_chart(best_schedule, machine_list, gantt_file, include_transport=False)
         
-        # 進化の履歴を表示
-        print(f"\n進化履歴（最初の10世代と最後の10世代）:")
+        # 遺伝的アルゴリズムでスケジュール最適化（搬送時間を考慮）
+        print("\n" + "=" * 60)
+        print("遺伝的アルゴリズムによるスケジュール最適化中（搬送時間考慮）...")
+        
+        # GAを実行（エッジグラフを渡して最短経路を計算）
+        ga_transport = GeneticAlgorithm(
+            job_list=job_list,
+            machine_dict=machine_dict,
+            population_size=POPULATION_SIZE,
+            crossover_rate=CROSSOVER_RATE,
+            mutation_rate=MUTATION_RATE,
+            max_generations=MAX_GENERATIONS,
+            route_dict=route_dict,  # 後方互換性のため
+            edge_graph=edge_graph  # エッジグラフで最短経路を計算
+        )
+        
+        best_individual_transport, best_fitness_transport, best_schedule_transport = ga_transport.evolve()
+        
+        print(f"\n最適化完了（搬送時間考慮）!")
+        print(f"最良ジョブ順序: {best_individual_transport}")
+        print(f"最良makespan: {best_fitness_transport:.2f}")
+        
+        # 最適スケジュールの詳細を表示
+        print("\n--- 最適スケジュール（搬送時間考慮） ---")
+        print_schedule_summary(best_schedule_transport)
+        
+        # テキストファイルに詳細結果を出力
+        output_file_transport = "schedule_result_optimized_with_transport.txt"
+        print(f"詳細結果を {output_file_transport} に出力中...")
+        create_text_output(best_schedule_transport, machine_list, output_file_transport)
+        
+        # ガントチャートを作成（搬送時間を含む）
+        gantt_file_transport = "ganttchart_optimized_with_transport.jpeg"
+        print(f"ガントチャート（搬送時間考慮）を {gantt_file_transport} に出力中...")
+        create_gantt_chart(best_schedule_transport, machine_list, gantt_file_transport, include_transport=True)
+        
+        # 比較結果を表示
+        print("\n" + "=" * 60)
+        print("比較結果")
+        print("=" * 60)
+        print(f"搬送時間考慮なし: makespan = {best_fitness:.2f}")
+        print(f"搬送時間考慮あり: makespan = {best_fitness_transport:.2f}")
+        if best_fitness > 0:
+            difference = best_fitness_transport - best_fitness
+            percentage = (difference / best_fitness) * 100
+            print(f"差: {difference:.2f} ({percentage:+.1f}%)")
+        
+        # 進化の履歴を表示（搬送時間考慮なし）
+        print(f"\n進化履歴（搬送時間考慮なし、最初の10世代と最後の10世代）:")
         for i, fitness in enumerate(ga.fitness_history):
             if i < 10 or i >= len(ga.fitness_history) - 10:
                 print(f"  世代 {i+1}: {fitness:.2f}")

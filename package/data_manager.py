@@ -103,3 +103,30 @@ def convert_route_list_into_dict(route_list: list[Route]) -> dict[str, Route]:
         route_dict[route.tip_node[1] + '->' + route.tip_node[0]] = copy.deepcopy(route)
 
     return route_dict
+
+
+def load_edge_data(file_path: str) -> dict[str, dict[str, float]]:
+    """
+    エッジデータを読み込んでグラフ構造（隣接リスト）に変換する関数
+    :param file_path: str
+    :return: dict[str, dict[str, float]] - {from_node: {to_node: cost}}
+    """
+    graph: dict[str, dict[str, float]] = {}
+    with open('./' + file_path, mode='r', encoding='utf-8') as file:
+        inp_str_list: list[list[str]] = [tmp for tmp in csv.reader(file)]
+        for split_str in inp_str_list:
+            if len(split_str) >= 4 and split_str[0] == '<EDGE>':
+                from_node = split_str[1]
+                to_node = split_str[2]
+                cost = float(split_str[3])
+                
+                if from_node not in graph:
+                    graph[from_node] = {}
+                graph[from_node][to_node] = cost
+                
+                # 双方向のエッジとして扱う（必要に応じて）
+                if to_node not in graph:
+                    graph[to_node] = {}
+                graph[to_node][from_node] = cost
+    
+    return graph
